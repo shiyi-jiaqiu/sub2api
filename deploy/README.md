@@ -29,6 +29,21 @@ This directory contains files for deploying Sub2API on Linux servers.
 
 ## Docker Deployment (Recommended)
 
+### Stable Custom Image Workflow
+
+If you maintain operator-side patches, pin production to a fixed image tag instead of `weishaw/sub2api:latest`.
+
+- `docker-compose.yml` and `docker-compose.standalone.yml` support `SUB2API_IMAGE`.
+- Set `SUB2API_IMAGE=ghcr.io/<owner>/sub2api:<tag>` in `.env` for stable rollout.
+- Use [`../tools/deploy_sub2api_custom.sh`](../tools/deploy_sub2api_custom.sh) from the repo root to:
+  - build and push a fixed custom image tag
+  - update `/opt/sub2api-deploy/.env` on the remote host
+  - patch the remote compose file to honor `SUB2API_IMAGE` if it still pins upstream `latest`
+  - restart `sub2api`
+  - patch the remote auto-update script so future updates follow the compose image, not hardcoded upstream `latest`
+
+This keeps future merges manageable: rebase/merge upstream into your fork, publish a new fixed tag, then redeploy that tag.
+
 ### Method 1: One-Click Deployment (Recommended)
 
 Use the automated preparation script for the easiest setup:

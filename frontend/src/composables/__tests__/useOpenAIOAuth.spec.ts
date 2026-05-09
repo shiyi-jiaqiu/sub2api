@@ -59,6 +59,18 @@ describe('useOpenAIOAuth.buildCredentials', () => {
     expect(creds.access_token).toBe('at')
     expect(creds.refresh_token).toBe('rt')
   })
+
+  it('should preserve subscription expiration when token response contains it', () => {
+    const oauth = useOpenAIOAuth()
+    const creds = oauth.buildCredentials({
+      access_token: 'at',
+      refresh_token: 'rt',
+      expires_at: 1700000000,
+      subscription_expires_at: '2026-05-09T11:37:47+00:00'
+    })
+
+    expect(creds.subscription_expires_at).toBe('2026-05-09T11:37:47+00:00')
+  })
 })
 
 describe('useOpenAIOAuth.exchangeAuthCode', () => {
