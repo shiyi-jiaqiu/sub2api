@@ -12,6 +12,8 @@ IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 PUSH_IMAGE="${PUSH_IMAGE:-1}"
 VERIFY_ONLY="${VERIFY_ONLY:-0}"
+INTERVAL_DAYS="${INTERVAL_DAYS:-3}"
+AUTO_UPDATE_SCRIPT_PATH="${AUTO_UPDATE_SCRIPT_PATH:-/usr/local/sbin/sub2api-auto-update.sh}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2
@@ -65,7 +67,7 @@ if [[ "${VERIFY_ONLY}" != "1" ]]; then
 
   echo "updating ${REMOTE_HOST}:${REMOTE_PROJECT_DIR}"
   vpsops "${REMOTE_HOST}" batch \
-    --cmd "cd ${REMOTE_PROJECT_DIR} && grep -q '^SUB2API_IMAGE=' .env && sed -i 's#^SUB2API_IMAGE=.*#SUB2API_IMAGE=${IMAGE_REF}#' .env || printf '\nSUB2API_IMAGE=${IMAGE_REF}\n' >> .env" \
+    --cmd "cd ${REMOTE_PROJECT_DIR} && if grep -q '^SUB2API_IMAGE=' .env; then sed -i 's#^SUB2API_IMAGE=.*#SUB2API_IMAGE=${IMAGE_REF}#' .env; else printf '\nSUB2API_IMAGE=%s\n' '${IMAGE_REF}' >> .env; fi" \
     --cmd "python3 - <<'PY'
 from pathlib import Path
 path = Path('${REMOTE_PROJECT_DIR}/docker-compose.yml')
@@ -78,49 +80,78 @@ PY" \
     --cmd "cd ${REMOTE_PROJECT_DIR} && docker compose pull sub2api && docker compose up -d --no-deps sub2api"
 fi
 
-echo "patching sub2api auto-update to follow compose image"
-vpsops "${REMOTE_HOST}" -- "python3 - <<'PY'
-from pathlib import Path
-path = Path('/usr/local/sbin/sub2api-auto-update.sh')
-text = path.read_text()
-old = \"\"\"before_digest=\"$(docker image inspect weishaw/sub2api:latest --format '{{index .RepoDigests 0}}' 2>/dev/null || true)\"
-echo \"before_digest=${before_digest}\"
+AUTO_UPDATE_TMP="$(mktemp)"
+trap 'rm -f "${AUTO_UPDATE_TMP}"' EXIT
+cat >"${AUTO_UPDATE_TMP}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
 
-docker compose pull sub2api
-docker compose up -d --no-deps sub2api postgres redis
+INTERVAL_DAYS="\${INTERVAL_DAYS:-${INTERVAL_DAYS}}"
+STATE_DIR="\${STATE_DIR:-/var/lib/sub2api-auto-update}"
+STATE_FILE="\${STATE_DIR}/last_success_epoch"
+PROJECT_DIR="\${PROJECT_DIR:-${REMOTE_PROJECT_DIR}}"
+IMAGE_REF="\${IMAGE_REF:-${IMAGE_REF}}"
 
-after_digest=\"$(docker image inspect weishaw/sub2api:latest --format '{{index .RepoDigests 0}}' 2>/dev/null || true)\"
-\"\"\"
-new = \"\"\"image_ref=\"\$(docker compose config | awk '/image:/ {print \$2; exit}')\"
-if [ -z \"\${image_ref}\" ]; then
-  echo \"failed to resolve image from compose config\" >&2
+if ! [[ "\${INTERVAL_DAYS}" =~ ^[0-9]+$ ]] || [ "\${INTERVAL_DAYS}" -lt 1 ]; then
+  echo "INTERVAL_DAYS must be a positive integer" >&2
   exit 1
 fi
 
-before_digest=\"\$(docker image inspect \"\${image_ref}\" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)\"
-echo \"image_ref=\${image_ref}\"
-echo \"before_digest=\${before_digest}\"
+now_epoch="\$(date +%s)"
+min_interval="\$((INTERVAL_DAYS * 86400))"
+
+if [ -f "\${STATE_FILE}" ]; then
+  last_epoch="\$(cat "\${STATE_FILE}" 2>/dev/null || echo 0)"
+  if [[ "\${last_epoch}" =~ ^[0-9]+$ ]]; then
+    elapsed="\$((now_epoch - last_epoch))"
+    if [ "\${elapsed}" -lt "\${min_interval}" ]; then
+      echo "skip: only \${elapsed}s elapsed (< \${min_interval}s)"
+      exit 0
+    fi
+  fi
+fi
+
+cd "\${PROJECT_DIR}"
+if grep -q "^SUB2API_IMAGE=" .env; then
+  sed -i "s#^SUB2API_IMAGE=.*#SUB2API_IMAGE=\${IMAGE_REF}#" .env
+else
+  printf "\nSUB2API_IMAGE=%s\n" "\${IMAGE_REF}" >> .env
+fi
 
 docker compose pull sub2api
-docker compose up -d --no-deps sub2api postgres redis
+docker compose up -d --no-deps sub2api
 
-after_digest=\"\$(docker image inspect \"\${image_ref}\" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)\"
-\"\"\"
-if old not in text and 'image_ref=\"\\$(docker compose config | awk \\'/image:/ {print \\$2; exit}\\')\"' not in text:
-    raise SystemExit('expected auto-update script shape not found')
-if old in text:
-    text = text.replace(old, new, 1)
-    path.write_text(text)
+status="\$(docker ps --filter "name=^/sub2api$" --format "{{.Status}}" | head -n 1)"
+if [ -z "\${status}" ] || [[ "\${status}" != Up* ]]; then
+  echo "sub2api is not running after update" >&2
+  exit 1
+fi
+
+mkdir -p "\${STATE_DIR}"
+printf "%s\n" "\${now_epoch}" > "\${STATE_FILE}"
+echo "update_complete=true"
+EOF
+
+AUTO_UPDATE_B64="$(base64 -w0 "${AUTO_UPDATE_TMP}")"
+
+echo "installing ${AUTO_UPDATE_SCRIPT_PATH} on ${REMOTE_HOST}"
+vpsops "${REMOTE_HOST}" -- "python3 - <<'PY'
+import base64
+from pathlib import Path
+
+payload = base64.b64decode('${AUTO_UPDATE_B64}')
+path = Path('${AUTO_UPDATE_SCRIPT_PATH}')
+path.write_bytes(payload)
+path.chmod(0o755)
 PY
-chmod +x /usr/local/sbin/sub2api-auto-update.sh
 systemctl daemon-reload
-systemctl restart sub2api-update.timer || true"
+systemctl restart sub2api-update.timer"
 
 echo "verifying remote service"
 vpsops "${REMOTE_HOST}" batch \
   --cmd "cd ${REMOTE_PROJECT_DIR} && docker compose ps sub2api" \
   --cmd "docker logs sub2api --tail 80 | tail -n 40" \
   --cmd "docker inspect sub2api --format '{{json .Config.Image}} {{json .Image}}'" \
-  --cmd "curl -fsS http://127.0.0.1:9080/api/health || curl -fsS http://127.0.0.1:9080/health || true"
+  --cmd "curl -fsS http://127.0.0.1:9080/health || curl -fsS http://127.0.0.1:9080/api/health || true"
 
 echo "done image_ref=${IMAGE_REF}"
