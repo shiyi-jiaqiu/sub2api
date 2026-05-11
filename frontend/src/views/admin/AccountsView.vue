@@ -214,11 +214,11 @@
             <div class="flex flex-col">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
               <span
-                v-if="row.extra?.email_address"
+                v-if="getAccountLoginEmail(row)"
                 class="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[200px]"
-                :title="row.extra.email_address"
+                :title="getAccountLoginEmail(row) || undefined"
               >
-                {{ row.extra.email_address }}
+                {{ getAccountLoginEmail(row) }}
               </span>
             </div>
           </template>
@@ -1095,6 +1095,22 @@ function getOpenAICompactTitle(row: any): string {
   const label = getOpenAICompactMeta(row)?.label || ''
   if (!checkedAt) return label
   return `${label} | ${t('admin.accounts.openai.compactLastChecked')}: ${formatDateTime(new Date(checkedAt))}`
+}
+
+function getAccountLoginEmail(row: any): string | null {
+  const extra = row.extra as Record<string, unknown> | undefined
+  const credentials = row.credentials as Record<string, unknown> | undefined
+  const candidates = [
+    extra?.email_address,
+    extra?.email,
+    credentials?.email
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+  return null
 }
 
 function getAntigravityTierClass(row: any): string {

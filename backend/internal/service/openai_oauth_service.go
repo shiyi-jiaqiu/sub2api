@@ -292,6 +292,14 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT_TYPE", "account is not an OAuth account")
 	}
 
+	var proxyURL string
+	if account.ProxyID != nil {
+		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
+		if err == nil && proxy != nil {
+			proxyURL = proxy.URL()
+		}
+	}
+
 	refreshToken := account.GetCredential("refresh_token")
 	if refreshToken == "" {
 		accessToken := account.GetCredential("access_token")
@@ -311,17 +319,10 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 				tokenInfo.ExpiresAt = expiresAt.Unix()
 				tokenInfo.ExpiresIn = int64(time.Until(*expiresAt).Seconds())
 			}
+			s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 			return tokenInfo, nil
 		}
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_NO_REFRESH_TOKEN", "no refresh token available")
-	}
-
-	var proxyURL string
-	if account.ProxyID != nil {
-		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
-		}
 	}
 
 	clientID := account.GetCredential("client_id")
